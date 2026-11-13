@@ -19,6 +19,7 @@ package main
 #include <net-snmp/net-snmp-config.h>
 #include <net-snmp/mib_api.h>
 #include <net-snmp/agent/agent_callbacks.h>
+#include <net-snmp/library/snmp_api.h>
 #include <net-snmp/library/default_store.h>
 #include <net-snmp/library/parse.h>
 #include <unistd.h>
@@ -41,6 +42,9 @@ struct tc {
   struct enum_list *enums;
   struct range_list *ranges;
   char           *description;
+#if defined(SNMP_FLAGS_SESSION_USER)
+  int             lineno;
+#endif
 #if !defined(NETSNMP_DS_LIB_ADD_FORWARDER_INFO)
 } tclist[MAXTC];
 int tc_alloc = MAXTC;
@@ -69,18 +73,18 @@ import "C"
 import (
 	"fmt"
 	"io"
+	"log/slog"
+	"maps"
 	"os"
 	"sort"
 	"strings"
-
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
 )
 
 // One entry in the tree of the MIB.
 type Node struct {
 	Oid               string
 	subid             int64
+	Module            string
 	Label             string
 	Augments          string
 	Children          []*Node
@@ -108,9 +112,7 @@ func (n *Node) Copy() *Node {
 	for _, child := range n.Children {
 		newNode.Children = append(newNode.Children, child.Copy())
 	}
-	for k, v := range n.EnumValues {
-		newNode.EnumValues[k] = v
-	}
+	maps.Copy(newNode.EnumValues, n.EnumValues)
 	return &newNode
 }
 
@@ -165,14 +167,14 @@ func getMibsDir(paths []string) string {
 // Initialize NetSNMP. Returns MIB parse errors.
 //
 // Warning: This function plays with the stderr file descriptor.
-func initSNMP(logger log.Logger) (string, error) {
+func initSNMP(logger *slog.Logger) (string, error) {
 	// Load all the MIBs.
 	err := os.Setenv("MIBS", "ALL")
 	if err != nil {
 		return "", err
 	}
 	mibsDir := getMibsDir(*userMibsDir)
-	level.Info(logger).Log("msg", "Loading MIBs", "from", mibsDir)
+	logger.Info("Loading MIBs", "from", mibsDir)
 	C.netsnmp_set_mib_directory(C.CString(mibsDir))
 	if *snmpMIBOpts != "" {
 		C.snmp_mib_toggle_options(C.CString(*snmpMIBOpts))
@@ -184,7 +186,7 @@ func initSNMP(logger log.Logger) (string, error) {
 	// way to disable or redirect.
 	r, w, err := os.Pipe()
 	if err != nil {
-		return "", fmt.Errorf("error creating pipe: %s", err)
+		return "", fmt.Errorf("error creating pipe: %w", err)
 	}
 	defer r.Close()
 	defer w.Close()
@@ -196,7 +198,7 @@ func initSNMP(logger log.Logger) (string, error) {
 	go func() {
 		data, err := io.ReadAll(r)
 		if err != nil {
-			errch <- fmt.Errorf("error reading from pipe: %s", err)
+			errch <- fmt.Errorf("error reading from pipe: %w", err)
 			return
 		}
 		errch <- nil
@@ -224,6 +226,9 @@ func buildMIBTree(t *C.struct_tree, n *Node, oid string) {
 		n.Oid = fmt.Sprintf("%s.%d", oid, t.subid)
 	} else {
 		n.Oid = fmt.Sprintf("%d", t.subid)
+	}
+	if m := C.find_module(t.modid); m != nil {
+		n.Module = C.GoString(m.name)
 	}
 	n.Label = C.GoString(t.label)
 	if typ, ok := netSnmptypeMap[int(t._type)]; ok {
@@ -287,7 +292,6 @@ func buildMIBTree(t *C.struct_tree, n *Node, oid string) {
 
 // Convert the NetSNMP MIB tree to a Go data structure.
 func getMIBTree() *Node {
-
 	tree := C.get_tree_head()
 	head := &Node{}
 	buildMIBTree(tree, head, "")

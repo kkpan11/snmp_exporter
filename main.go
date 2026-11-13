@@ -15,8 +15,10 @@ package main
 
 import (
 	"fmt"
+	"log/slog"
 	"net/http"
 	_ "net/http/pprof"
+	"net/url"
 	"os"
 	"os/signal"
 	"strings"
@@ -24,18 +26,16 @@ import (
 	"syscall"
 
 	"github.com/alecthomas/kingpin/v2"
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
 	"github.com/prometheus/client_golang/prometheus"
 	versioncollector "github.com/prometheus/client_golang/prometheus/collectors/version"
 	"github.com/prometheus/client_golang/prometheus/promauto"
 	"github.com/prometheus/client_golang/prometheus/promhttp"
-	"github.com/prometheus/common/promlog"
-	"github.com/prometheus/common/promlog/flag"
+	"github.com/prometheus/common/promslog"
+	"github.com/prometheus/common/promslog/flag"
 	"github.com/prometheus/common/version"
 	"github.com/prometheus/exporter-toolkit/web"
 	webflag "github.com/prometheus/exporter-toolkit/web/kingpinflag"
-	yaml "gopkg.in/yaml.v2"
+	"go.yaml.in/yaml/v2"
 
 	"github.com/prometheus/snmp_exporter/collector"
 	"github.com/prometheus/snmp_exporter/config"
@@ -84,7 +84,31 @@ const (
 	configPath = "/config"
 )
 
-func handler(w http.ResponseWriter, r *http.Request, logger log.Logger, exporterMetrics collector.Metrics) {
+func parseModules(query url.Values) ([]string, error) {
+	queryModule := query["module"]
+	if len(queryModule) == 0 {
+		queryModule = append(queryModule, "if_mib")
+	}
+	uniqueM := make(map[string]bool)
+	var modules []string
+	for _, qm := range queryModule {
+		for m := range strings.SplitSeq(qm, ",") {
+			if m == "" {
+				continue
+			}
+			if _, ok := uniqueM[m]; !ok {
+				uniqueM[m] = true
+				modules = append(modules, m)
+			}
+		}
+	}
+	if len(modules) == 0 {
+		return nil, fmt.Errorf("'module' parameter must contain at least one module name")
+	}
+	return modules, nil
+}
+
+func handler(w http.ResponseWriter, r *http.Request, logger *slog.Logger, exporterMetrics collector.Metrics) {
 	query := r.URL.Query()
 
 	debug := *debugSNMP
@@ -92,7 +116,7 @@ func handler(w http.ResponseWriter, r *http.Request, logger log.Logger, exporter
 		debug = true
 		// TODO: This doesn't work the way I want.
 		// logger = level.NewFilter(logger, level.AllowDebug())
-		level.Debug(logger).Log("msg", "Debug query param enabled")
+		logger.Debug("Debug query param enabled")
 	}
 
 	target := query.Get("target")
@@ -119,27 +143,23 @@ func handler(w http.ResponseWriter, r *http.Request, logger log.Logger, exporter
 		return
 	}
 
-	queryModule := query["module"]
-	if len(queryModule) == 0 {
-		queryModule = append(queryModule, "if_mib")
+	snmpEngineID := query.Get("snmp_engineid")
+	if len(query["snmp_engineid"]) > 1 {
+		http.Error(w, "'snmp_engineid' parameter must only be specified once", http.StatusBadRequest)
+		snmpRequestErrors.Inc()
+		return
 	}
-	uniqueM := make(map[string]bool)
-	var modules []string
-	for _, qm := range queryModule {
-		for _, m := range strings.Split(qm, ",") {
-			if m == "" {
-				continue
-			}
-			if _, ok := uniqueM[m]; !ok {
-				uniqueM[m] = true
-				modules = append(modules, m)
-			}
-		}
+
+	modules, err := parseModules(query)
+	if err != nil {
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		snmpRequestErrors.Inc()
+		return
 	}
-	sc.RLock()
+	sc.mu.RLock()
 	auth, authOk := sc.C.Auths[authName]
 	if !authOk {
-		sc.RUnlock()
+		sc.mu.RUnlock()
 		http.Error(w, fmt.Sprintf("Unknown auth '%s'", authName), http.StatusBadRequest)
 		snmpRequestErrors.Inc()
 		return
@@ -148,17 +168,17 @@ func handler(w http.ResponseWriter, r *http.Request, logger log.Logger, exporter
 	for _, m := range modules {
 		module, moduleOk := sc.C.Modules[m]
 		if !moduleOk {
-			sc.RUnlock()
+			sc.mu.RUnlock()
 			http.Error(w, fmt.Sprintf("Unknown module '%s'", m), http.StatusBadRequest)
 			snmpRequestErrors.Inc()
 			return
 		}
 		nmodules = append(nmodules, collector.NewNamedModule(m, module))
 	}
-	sc.RUnlock()
-	logger = log.With(logger, "auth", authName, "target", target)
+	sc.mu.RUnlock()
+	logger = logger.With("auth", authName, "target", target)
 	registry := prometheus.NewRegistry()
-	c := collector.New(r.Context(), target, authName, snmpContext, auth, nmodules, logger, exporterMetrics, *concurrency, debug)
+	c := collector.New(r.Context(), target, authName, snmpContext, snmpEngineID, auth, nmodules, logger, exporterMetrics, *concurrency, debug)
 	registry.MustRegister(c)
 	// Delegate http serving to Prometheus client library, which will call collector.Collect.
 	h := promhttp.HandlerFor(registry, promhttp.HandlerOpts{})
@@ -179,52 +199,63 @@ func updateConfiguration(w http.ResponseWriter, r *http.Request) {
 }
 
 type SafeConfig struct {
-	sync.RWMutex
-	C *config.Config
+	mu sync.RWMutex
+	C  *config.Config
 }
 
-func (sc *SafeConfig) ReloadConfig(configFile []string, expandEnvVars bool) (err error) {
-	conf, err := config.LoadFile(configFile, expandEnvVars)
+func (sc *SafeConfig) ReloadConfig(logger *slog.Logger, configFile []string, expandEnvVars bool) (err error) {
+	conf, err := config.LoadFile(logger, configFile, expandEnvVars)
 	if err != nil {
 		return err
 	}
-	sc.Lock()
+	sc.mu.Lock()
 	sc.C = conf
 	// Initialize metrics.
 	for module := range sc.C.Modules {
 		snmpCollectionDuration.WithLabelValues(module)
 	}
-	sc.Unlock()
+	sc.mu.Unlock()
 	return nil
 }
 
 func main() {
-	promlogConfig := &promlog.Config{}
-	flag.AddFlags(kingpin.CommandLine, promlogConfig)
+	promslogConfig := &promslog.Config{}
+	flag.AddFlags(kingpin.CommandLine, promslogConfig)
 	kingpin.Version(version.Print("snmp_exporter"))
 	kingpin.HelpFlag.Short('h')
 	kingpin.Parse()
-	logger := promlog.New(promlogConfig)
+	logger := promslog.New(promslogConfig)
 	if *concurrency < 1 {
 		*concurrency = 1
 	}
 
-	level.Info(logger).Log("msg", "Starting snmp_exporter", "version", version.Info(), "concurrency", concurrency, "debug_snmp", debugSNMP)
-	level.Info(logger).Log("build_context", version.BuildContext())
+	logger.Info("Starting snmp_exporter", "version", version.Info(), "concurrency", concurrency, "debug_snmp", debugSNMP)
+	logger.Info("operational information", "build_context", version.BuildContext())
 
 	prometheus.MustRegister(versioncollector.NewCollector("snmp_exporter"))
 
 	// Bail early if the config is bad.
-	err := sc.ReloadConfig(*configFile, *expandEnvVars)
+	err := sc.ReloadConfig(logger, *configFile, *expandEnvVars)
 	if err != nil {
-		level.Error(logger).Log("msg", "Error parsing config file", "err", err)
-		level.Error(logger).Log("msg", "Possible old config file, see https://github.com/prometheus/snmp_exporter/blob/main/auth-split-migration.md")
+		logger.Error("Error parsing config file", "err", err)
+		logger.Error("Possible version mismatch between generator and snmp_exporter. Make sure generator and snmp_exporter are the same version.")
+		logger.Error("See also: https://github.com/prometheus/snmp_exporter/blob/main/auth-split-migration.md")
+		os.Exit(1)
+	}
+	if len(sc.C.Modules) == 0 {
+		logger.Error("Configuration is missing Modules. Did you provide any configuration file?")
+		os.Exit(1)
+	}
+	if len(sc.C.Auths) == 0 {
+		logger.Error("Configuration is missing Auths.")
+		logger.Error("Possible version mismatch between generator and snmp_exporter. Make sure generator and snmp_exporter are the same version.")
+		logger.Error("See also: https://github.com/prometheus/snmp_exporter/blob/main/auth-split-migration.md")
 		os.Exit(1)
 	}
 
 	// Exit if in dry-run mode.
 	if *dryRun {
-		level.Info(logger).Log("msg", "Configuration parsed successfully")
+		logger.Info("Configuration parsed successfully")
 		return
 	}
 
@@ -235,17 +266,17 @@ func main() {
 		for {
 			select {
 			case <-hup:
-				if err := sc.ReloadConfig(*configFile, *expandEnvVars); err != nil {
-					level.Error(logger).Log("msg", "Error reloading config", "err", err)
+				if err := sc.ReloadConfig(logger, *configFile, *expandEnvVars); err != nil {
+					logger.Error("Error reloading config", "err", err)
 				} else {
-					level.Info(logger).Log("msg", "Loaded config file")
+					logger.Info("Loaded config file")
 				}
 			case rc := <-reloadCh:
-				if err := sc.ReloadConfig(*configFile, *expandEnvVars); err != nil {
-					level.Error(logger).Log("msg", "Error reloading config", "err", err)
+				if err := sc.ReloadConfig(logger, *configFile, *expandEnvVars); err != nil {
+					logger.Error("Error reloading config", "err", err)
 					rc <- err
 				} else {
-					level.Info(logger).Log("msg", "Loaded config file")
+					logger.Info("Loaded config file")
 					rc <- nil
 				}
 			}
@@ -299,6 +330,11 @@ func main() {
 		handler(w, r, logger, exporterMetrics)
 	})
 	http.HandleFunc("/-/reload", updateConfiguration) // Endpoint to reload configuration.
+	// Endpoint to respond to health checks
+	http.HandleFunc("/-/healthy", func(w http.ResponseWriter, _ *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("Healthy"))
+	})
 
 	if *metricsPath != "/" && *metricsPath != "" {
 		landingConfig := web.LandingConfig{
@@ -344,18 +380,18 @@ func main() {
 		}
 		landingPage, err := web.NewLandingPage(landingConfig)
 		if err != nil {
-			level.Error(logger).Log("err", err)
+			logger.Error("Error creating landing page", "err", err)
 			os.Exit(1)
 		}
 		http.Handle("/", landingPage)
 	}
 
-	http.HandleFunc(configPath, func(w http.ResponseWriter, r *http.Request) {
-		sc.RLock()
+	http.HandleFunc(configPath, func(w http.ResponseWriter, _ *http.Request) {
+		sc.mu.RLock()
 		c, err := yaml.Marshal(sc.C)
-		sc.RUnlock()
+		sc.mu.RUnlock()
 		if err != nil {
-			level.Error(logger).Log("msg", "Error marshaling configuration", "err", err)
+			logger.Error("Error marshaling configuration", "err", err)
 			http.Error(w, err.Error(), http.StatusInternalServerError)
 			return
 		}
@@ -364,7 +400,7 @@ func main() {
 
 	srv := &http.Server{}
 	if err := web.ListenAndServe(srv, toolkitFlags, logger); err != nil {
-		level.Error(logger).Log("msg", "Error starting HTTP server", "err", err)
+		logger.Error("Error starting HTTP server", "err", err)
 		os.Exit(1)
 	}
 }

@@ -1,3 +1,159 @@
+## 0.31.0 / 2026-10-25
+
+BREAKING CHANGES:
+
+Regenerating snmp.yml with the generator now maps enum lookup columns to
+human-readable string labels (e.g. `"ioMemory"` instead of `"2"`) by default.
+Dashboards, alerts, or recording rules that match on numeric enum label values
+may need updating. Opt out per metric/lookup with `type: gauge`.
+
+The generator now drops tables whose index type cannot be rendered as a label
+(e.g. DateAndTime, Bits) with a warning, and fails when a chained lookup
+promotes such a type to an index. Previously these produced configs that
+crashed the exporter on scrape.
+
+Building from source now requires Go 1.26 or newer.
+
+* [FEATURE] Add DISPLAY-HINT support for SNMP OctetString formatting #1549
+* [FEATURE] Add `ParseFloatString` type override #1678
+* [CHANGE] Map enum lookup columns to human-readable string labels #1624
+* [CHANGE] generator: Handle net-snmp 5.9.5.x changes to struct tclist #1550
+* [CHANGE] generator: Update Docker base image to Debian Trixie #1635
+* [CHANGE] generator: Reject index types the collector cannot render #1653
+* [CHANGE] Update minimum Go version to 1.26 #1708
+* [ENHANCEMENT] Apply scale and offset during applyRegexExtracts #1580
+* [ENHANCEMENT] Docker: Added consistent opencontainer image labels #1581
+* [ENHANCEMENT] generator: Move generator output to repo root snmp.yml #1557
+* [ENHANCEMENT] docs(generator): Document default EnumAsInfo enum label behavior #1634
+* [ENHANCEMENT] Update docs on where to get APC MIBs #1600
+* [ENHANCEMENT] Add git and patch to RHEL installation command #1609
+* [ENHANCEMENT] generator: Map String64 textual convention to DisplayString #1674
+* [ENHANCEMENT] generator: Publish snmp-generator Docker image via promci #1645
+* [ENHANCEMENT] generator: Retry MIB downloads on all errors #1702
+* [ENHANCEMENT] Use upstream default DOCKER_ARCHS #1703
+* [ENHANCEMENT] docs: Add practical SNMP config samples #1661
+* [ENHANCEMENT] Update gosnmp to 1.47.0 #1667 #1699 #1716
+* [BUGFIX] Ensure memory isolation for WalkParams.Retries per module #1598
+* [BUGFIX] Fix multiple dynamic filters on the same OID overriding each other #1625
+* [BUGFIX] Fix IPv6 bracket handling in target parsing #1588
+* [BUGFIX] Treat empty environment variables as set during expansion #1626
+* [BUGFIX] Also error when env var in config is prefixed or suffixed #1500
+* [BUGFIX] Reject empty module query parameter #1629
+* [BUGFIX] Sanitize index-derived label values to valid UTF-8 #1646
+* [BUGFIX] Report total scrape duration in scrape canceled errors #1715
+* [BUGFIX] generator: Only rewrite `1x:` hint to PhysAddress48 for fixed size 6 #1648
+* [BUGFIX] Handle hex.DecodeString error for SNMPv3 EngineID #1591
+* [BUGFIX] Use comma-ok type assertion and length guard in parseNtpTimestamp #1590
+* [BUGFIX] generator: Close output file to prevent fd leak #1592
+* [BUGFIX] generator: Fix Synology MIB file download link #1615
+* [BUGFIX] generator: Fix generator publish #1608
+* [BUGFIX] generator: Fetch Eltex MIBs from prometheus-community/snmp #1628
+
+snmp.yml changes:
+* Add branchTable to servertech_sentry3 module #1554
+* Update Sentry3-MIB #1555
+* Improve Sentry4-MIB module #1560
+* Update Eltex MIBs #1564 #1573 #1628
+* Add DELL-RAC-MIB #1566
+* Patch SYNOLOGY-SMART-MIB #1574
+* Update Mikrotik MIBs #1582
+* Add Synology diskID, diskName, diskRole overrides #1603
+* Regenerate snmp.yml with enum lookup string labels #1624
+* Mirror Dell MIBs and update APC PowerNet-MIB to 4.6.0 #1659
+* Use `ParseFloatString` in example modules #1678
+* Add missing Synology system metrics #1681
+* Add apcats module for APC/Schneider ATS devices #1692
+* Add Synology iSCSI DisplayString overrides #1707
+
+## 0.30.1 / 2026-01-06
+
+* [BUGFIX] Fix gosnmp import #1547
+
+## 0.30.0 / 2026-01-05
+
+* [FEATURE] Add snmp_engineid support #1482
+* [ENHANCEMENT] Warn if configuration file not found, fail if missing auths or modules #1457
+* [ENHANCEMENT] Optimize OID conversion functions with pre-allocation #1533
+* [ENHANCEMENT] Handle uint32 type in pduValueAsString #1542
+* [BUGFIX] Fix generator Makefile user agent #1476
+
+snmp.yml changes:
+* Update ELTEX MIB #1435
+* Update keepalived MIB #1455
+* Add UPS MIB #1464
+* Improve APC UPS module #1494
+* Add NAPT metrics in nec_ix module #1497
+* Annotate supply metrics with prtMarkerSuppliesDescription #1513
+* Add picoExtIfDescr label to nec_ix module #1514
+* Update Raritan PDU2 MIB #1535
+* Add Cisco Core metrics #1536
+
+## 0.29.0 / 2025-04-23
+
+* [CHANGE] generator: fail early for bad walk OID #1411
+
+snmp.yml changes:
+* added Yamaha RT Series module #1369
+* updated APC Powernet MIB #1376
+* added cisco_device and cisco_fc_fe modules #1367 - #1374 #1375
+* added MSA fieldserver gateway module fieldserver #1392
+* update Mikrotik MIB to 7.18.2 #1417
+* fixed hrDevice override #1398
+* update Eltex MIB to 10.3.6.11 #1415
+
+## 0.28.0 / 2025-02-07
+
+BREAKING CHANGES:
+
+In this version of the exporter the sysUpTime metric has been removed from the if_mib module and 
+is now part of the new system module, along with other useful system related metrics.
+Please update your scrape definitions to include the system module if you need sysUpTime.
+
+* [ENHANCEMENT] allow module-qualified labels in generator #1333
+* [ENHANCEMENT] add healthcheck endpoint #1358
+* [ENHANCEMENT] Override Metric Name in Generator #1341
+* [BUGFIX] cleanup docker container after running #1330
+
+snmp.yml changes:
+* moved system related oids to the new system module #1334
+* add UBNT AirOS module, DLink and Eltex MES #1344
+* add JunOS module #1348
+* enhancements on the hrStorage module, cleanup unused lookups for mikrotik module #1349
+* update JunOS module and add Juniper Optics (DOM) module #1351
+* added page counters to the printer module #1353
+
+## 0.27.0 / 2025-01-03
+BREAKING CHANGES:
+
+This version of the exporter introduces a cleaned up default snmp.yml that moved all
+ucd-snmp-mib oids into a separate module.
+
+If you used one of the following modules:
+* synology
+* ddwrt
+* kemp_loadmaster 
+
+you will need to change your scrape config to also include the ucd_la_table module as well.
+See https://github.com/prometheus/snmp_exporter/tree/main?tab=readme-ov-file#multi-module-handling for further instructions.
+
+* [CHANGE] generator: Update generator default MIBOPTS #1231
+* [CHANGE] adopt log/slog, drop go-kit/log #1249
+* [ENHANCEMENT] generator: Improve config error message #1274
+* [FEATURE] add ParseDateAndTime type #1234 
+* [FEATURE] Set UseUnconnectedUDPSocket option if one of the modules has if set #1247
+* [FEATURE] add NTPTimeStamp type #1315
+* [BUGFIX] fixed dashboard mixins #1319
+
+snmp.yml changes:
+* cleanup ucd-snmp-mibs #1200
+  * moved oids from synology,ddwrt and kemp_loadmaster to new module ucd_la_table 
+* Added support for Sophos XG Series #1239
+* Added support for HPE #1267
+* Added support for powercom #1275
+* Added support for Cisco IMC #1293
+* Updated mib for apc #1303
+* Added support for TPLink DDM #1304
+
 ## 0.26.0 / 2024-05-08
 
 * [CHANGE] Improve generator parse error handling #1167

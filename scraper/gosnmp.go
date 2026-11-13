@@ -15,24 +15,26 @@ package scraper
 
 import (
 	"context"
+	"errors"
 	"fmt"
-	stdlog "log"
+	"log/slog"
 	"net"
 	"strconv"
 	"strings"
 	"time"
 
-	"github.com/go-kit/log"
-	"github.com/go-kit/log/level"
 	"github.com/gosnmp/gosnmp"
 )
 
 type GoSNMPWrapper struct {
 	c      *gosnmp.GoSNMP
-	logger log.Logger
+	logger *slog.Logger
+	// start is when Connect was called, used to report how long the
+	// whole scrape ran before being canceled.
+	start time.Time
 }
 
-func NewGoSNMP(logger log.Logger, target, srcAddress string, debug bool) (*GoSNMPWrapper, error) {
+func NewGoSNMP(logger *slog.Logger, target, srcAddress string, debug bool) (*GoSNMPWrapper, error) {
 	transport := "udp"
 	if s := strings.SplitN(target, "://", 2); len(s) == 2 {
 		transport = s[0]
@@ -45,7 +47,13 @@ func NewGoSNMP(logger log.Logger, target, srcAddress string, debug bool) (*GoSNM
 		if err != nil {
 			return nil, fmt.Errorf("error converting port number to int for target %q: %w", target, err)
 		}
+		if p < 0 || p > 65535 {
+			return nil, fmt.Errorf("port number out of range for target %q", target)
+		}
 		port = uint16(p)
+	} else if host, _, err := net.SplitHostPort(target + ":0"); err == nil {
+		// Strip brackets from IPv6 addresses like "[::1]" that have no port.
+		target = host
 	}
 	g := &gosnmp.GoSNMP{
 		Transport: transport,
@@ -54,7 +62,7 @@ func NewGoSNMP(logger log.Logger, target, srcAddress string, debug bool) (*GoSNM
 		LocalAddr: srcAddress,
 	}
 	if debug {
-		g.Logger = gosnmp.NewLogger(stdlog.New(log.NewStdlibAdapter(level.Debug(logger)), "", 0))
+		g.Logger = gosnmp.NewLogger(slog.NewLogLogger(logger.Handler(), slog.LevelDebug))
 	}
 	return &GoSNMPWrapper{c: g, logger: logger}, nil
 }
@@ -66,41 +74,43 @@ func (g *GoSNMPWrapper) SetOptions(fns ...func(*gosnmp.GoSNMP)) {
 }
 
 func (g *GoSNMPWrapper) Connect() error {
-	st := time.Now()
+	g.start = time.Now()
 	err := g.c.Connect()
 	if err != nil {
-		if err == context.Canceled {
+		if errors.Is(err, context.Canceled) {
 			return fmt.Errorf("scrape cancelled after %s (possible timeout) connecting to target %s",
-				time.Since(st), g.c.Target)
+				time.Since(g.start), g.c.Target)
 		}
-		return fmt.Errorf("error connecting to target %s: %s", g.c.Target, err)
+		return fmt.Errorf("error connecting to target %s: %w", g.c.Target, err)
 	}
 	return nil
 }
 
 func (g *GoSNMPWrapper) Close() error {
-	return g.c.Conn.Close()
+	return g.c.Close()
 }
 
-func (g *GoSNMPWrapper) Get(oids []string) (results *gosnmp.SnmpPacket, err error) {
-	level.Debug(g.logger).Log("msg", "Getting OIDs", "oids", oids)
+func (g *GoSNMPWrapper) Get(oids []string) (*gosnmp.SnmpPacket, error) {
+	g.logger.Debug("Getting OIDs", "oids", oids)
 	st := time.Now()
-	results, err = g.c.Get(oids)
+	results, err := g.c.Get(oids)
 	if err != nil {
-		if err == context.Canceled {
+		if errors.Is(err, context.Canceled) {
 			err = fmt.Errorf("scrape cancelled after %s (possible timeout) getting target %s",
-				time.Since(st), g.c.Target)
+				time.Since(g.start), g.c.Target)
 		} else {
-			err = fmt.Errorf("error getting target %s: %s", g.c.Target, err)
+			err = fmt.Errorf("error getting target %s: %w", g.c.Target, err)
 		}
-		return
+		return results, err
 	}
-	level.Debug(g.logger).Log("msg", "Get of OIDs completed", "oids", oids, "duration_seconds", time.Since(st))
-	return
+	g.logger.Debug("Get of OIDs completed", "oids", oids, "duration_seconds", time.Since(st))
+	return results, err
 }
 
-func (g *GoSNMPWrapper) WalkAll(oid string) (results []gosnmp.SnmpPDU, err error) {
-	level.Debug(g.logger).Log("msg", "Walking subtree", "oid", oid)
+func (g *GoSNMPWrapper) WalkAll(oid string) ([]gosnmp.SnmpPDU, error) {
+	var results []gosnmp.SnmpPDU
+	var err error
+	g.logger.Debug("Walking subtree", "oid", oid)
 	st := time.Now()
 	if g.c.Version == gosnmp.Version1 {
 		results, err = g.c.WalkAll(oid)
@@ -108,14 +118,14 @@ func (g *GoSNMPWrapper) WalkAll(oid string) (results []gosnmp.SnmpPDU, err error
 		results, err = g.c.BulkWalkAll(oid)
 	}
 	if err != nil {
-		if err == context.Canceled {
-			err = fmt.Errorf("scrape canceled after %s (possible timeout) walking target %s",
-				time.Since(st), g.c.Target)
+		if errors.Is(err, context.Canceled) {
+			err = fmt.Errorf("scrape canceled after %s (possible timeout) walking subtree %s of target %s",
+				time.Since(g.start), oid, g.c.Target)
 		} else {
-			err = fmt.Errorf("error walking target %s: %s", g.c.Target, err)
+			err = fmt.Errorf("error walking target %s: %w", g.c.Target, err)
 		}
-		return
+		return results, err
 	}
-	level.Debug(g.logger).Log("msg", "Walk of subtree completed", "oid", oid, "duration_seconds", time.Since(st))
-	return
+	g.logger.Debug("Walk of subtree completed", "oid", oid, "duration_seconds", time.Since(st))
+	return results, err
 }

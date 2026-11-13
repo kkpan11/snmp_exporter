@@ -15,8 +15,9 @@ package main
 
 import (
 	"fmt"
-	"github.com/prometheus/snmp_exporter/config"
 	"strconv"
+
+	"github.com/prometheus/snmp_exporter/config"
 )
 
 // The generator config.
@@ -27,16 +28,19 @@ type Config struct {
 }
 
 type MetricOverrides struct {
-	Ignore         bool                              `yaml:"ignore,omitempty"`
-	RegexpExtracts map[string][]config.RegexpExtract `yaml:"regex_extracts,omitempty"`
-	Offset         float64                           `yaml:"offset,omitempty"`
-	Scale          float64                           `yaml:"scale,omitempty"`
-	Type           string                            `yaml:"type,omitempty"`
-	Help           string                            `yaml:"help,omitempty"`
+	Ignore          bool                              `yaml:"ignore,omitempty"`
+	RegexpExtracts  map[string][]config.RegexpExtract `yaml:"regex_extracts,omitempty"`
+	DateTimePattern string                            `yaml:"datetime_pattern,omitempty"`
+	Offset          float64                           `yaml:"offset,omitempty"`
+	Scale           float64                           `yaml:"scale,omitempty"`
+	Type            string                            `yaml:"type,omitempty"`
+	Help            string                            `yaml:"help,omitempty"`
+	Name            string                            `yaml:"name,omitempty"`
+	DisplayHint     string                            `yaml:"display_hint,omitempty"`
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
-func (c *MetricOverrides) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (c *MetricOverrides) UnmarshalYAML(unmarshal func(any) error) error {
 	type plain MetricOverrides
 	if err := unmarshal((*plain)(c)); err != nil {
 		return err
@@ -59,7 +63,7 @@ type ModuleConfig struct {
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
-func (c *ModuleConfig) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (c *ModuleConfig) UnmarshalYAML(unmarshal func(any) error) error {
 	type plain ModuleConfig
 	if err := unmarshal((*plain)(c)); err != nil {
 		return err
@@ -82,4 +86,5 @@ type Lookup struct {
 	SourceIndexes     []string `yaml:"source_indexes"`
 	Lookup            string   `yaml:"lookup"`
 	DropSourceIndexes bool     `yaml:"drop_source_indexes,omitempty"`
+	DisplayHint       string   `yaml:"display_hint,omitempty"`
 }

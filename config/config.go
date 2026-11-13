@@ -16,21 +16,37 @@ package config
 import (
 	"errors"
 	"fmt"
+	"log/slog"
 	"os"
 	"path/filepath"
 	"regexp"
 	"time"
 
 	"github.com/gosnmp/gosnmp"
-	"gopkg.in/yaml.v2"
+	"go.yaml.in/yaml/v2"
 )
 
-func LoadFile(paths []string, expandEnvVars bool) (*Config, error) {
+type Auth struct {
+	Community     Secret `yaml:"community,omitempty"`
+	SecurityLevel string `yaml:"security_level,omitempty"`
+	Username      string `yaml:"username,omitempty"`
+	Password      Secret `yaml:"password,omitempty"`
+	AuthProtocol  string `yaml:"auth_protocol,omitempty"`
+	PrivProtocol  string `yaml:"priv_protocol,omitempty"`
+	PrivPassword  Secret `yaml:"priv_password,omitempty"`
+	ContextName   string `yaml:"context_name,omitempty"`
+	Version       int    `yaml:"version,omitempty"`
+}
+
+func LoadFile(logger *slog.Logger, paths []string, expandEnvVars bool) (*Config, error) {
 	cfg := &Config{}
 	for _, p := range paths {
 		files, err := filepath.Glob(p)
 		if err != nil {
 			return nil, err
+		}
+		if len(files) == 0 {
+			logger.Warn("No file found matching pattern", "file", p)
 		}
 		for _, f := range files {
 			content, err := os.ReadFile(f)
@@ -122,8 +138,12 @@ type Module struct {
 	Filters    []DynamicFilter `yaml:"filters,omitempty"`
 }
 
-func (c *Module) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (c *Module) UnmarshalYAML(unmarshal func(any) error) error {
 	*c = DefaultModule
+	if c.WalkParams.Retries != nil {
+		retries := *c.WalkParams.Retries
+		c.WalkParams.Retries = &retries
+	}
 	type plain Module
 	return unmarshal((*plain)(c))
 }
@@ -216,16 +236,36 @@ type DynamicFilter struct {
 }
 
 type Metric struct {
-	Name           string                     `yaml:"name"`
-	Oid            string                     `yaml:"oid"`
-	Type           string                     `yaml:"type"`
-	Help           string                     `yaml:"help"`
-	Indexes        []*Index                   `yaml:"indexes,omitempty"`
-	Lookups        []*Lookup                  `yaml:"lookups,omitempty"`
-	RegexpExtracts map[string][]RegexpExtract `yaml:"regex_extracts,omitempty"`
-	EnumValues     map[int]string             `yaml:"enum_values,omitempty"`
-	Offset         float64                    `yaml:"offset,omitempty"`
-	Scale          float64                    `yaml:"scale,omitempty"`
+	Name            string                     `yaml:"name"`
+	Oid             string                     `yaml:"oid"`
+	Type            string                     `yaml:"type"`
+	Help            string                     `yaml:"help"`
+	Indexes         []*Index                   `yaml:"indexes,omitempty"`
+	Lookups         []*Lookup                  `yaml:"lookups,omitempty"`
+	RegexpExtracts  map[string][]RegexpExtract `yaml:"regex_extracts,omitempty"`
+	DateTimePattern string                     `yaml:"datetime_pattern,omitempty"`
+	EnumValues      map[int]string             `yaml:"enum_values,omitempty"`
+	Offset          float64                    `yaml:"offset,omitempty"`
+	Scale           float64                    `yaml:"scale,omitempty"`
+	DisplayHint     string                     `yaml:"display_hint,omitempty"`
+}
+
+// RenderableIndexTypes are the Index types the collector can render as label
+// values (the switch in indexOidsAsString); any other type panics there.
+var RenderableIndexTypes = map[string]bool{
+	"Integer32":              true,
+	"Integer":                true,
+	"gauge":                  true,
+	"counter":                true,
+	"PhysAddress48":          true,
+	"OctetString":            true,
+	"DisplayString":          true,
+	"InetAddressIPv4":        true,
+	"InetAddressIPv6":        true,
+	"InetAddress":            true,
+	"InetAddressMissingSize": true,
+	"LldpPortId":             true,
+	"EnumAsInfo":             true,
 }
 
 type Index struct {
@@ -236,11 +276,24 @@ type Index struct {
 	EnumValues map[int]string `yaml:"enum_values,omitempty"`
 }
 
+func (c *Index) UnmarshalYAML(unmarshal func(any) error) error {
+	type plain Index
+	if err := unmarshal((*plain)(c)); err != nil {
+		return err
+	}
+	if !RenderableIndexTypes[c.Type] {
+		return fmt.Errorf("invalid index type %q", c.Type)
+	}
+	return nil
+}
+
 type Lookup struct {
-	Labels    []string `yaml:"labels"`
-	Labelname string   `yaml:"labelname"`
-	Oid       string   `yaml:"oid,omitempty"`
-	Type      string   `yaml:"type,omitempty"`
+	Labels      []string       `yaml:"labels"`
+	Labelname   string         `yaml:"labelname"`
+	Oid         string         `yaml:"oid,omitempty"`
+	Type        string         `yaml:"type,omitempty"`
+	DisplayHint string         `yaml:"display_hint,omitempty"`
+	EnumValues  map[int]string `yaml:"enum_values,omitempty"`
 }
 
 // Secret is a string that must not be revealed on marshaling.
@@ -256,7 +309,7 @@ var (
 )
 
 // MarshalYAML implements the yaml.Marshaler interface.
-func (s Secret) MarshalYAML() (interface{}, error) {
+func (s Secret) MarshalYAML() (any, error) {
 	if DoNotHideSecrets {
 		return string(s), nil
 	}
@@ -266,19 +319,7 @@ func (s Secret) MarshalYAML() (interface{}, error) {
 	return nil, nil
 }
 
-type Auth struct {
-	Community     Secret `yaml:"community,omitempty"`
-	SecurityLevel string `yaml:"security_level,omitempty"`
-	Username      string `yaml:"username,omitempty"`
-	Password      Secret `yaml:"password,omitempty"`
-	AuthProtocol  string `yaml:"auth_protocol,omitempty"`
-	PrivProtocol  string `yaml:"priv_protocol,omitempty"`
-	PrivPassword  Secret `yaml:"priv_password,omitempty"`
-	ContextName   string `yaml:"context_name,omitempty"`
-	Version       int    `yaml:"version,omitempty"`
-}
-
-func (c *Auth) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (c *Auth) UnmarshalYAML(unmarshal func(any) error) error {
 	*c = DefaultAuth
 	type plain Auth
 	if err := unmarshal((*plain)(c)); err != nil {
@@ -322,7 +363,7 @@ type RegexpExtract struct {
 	Regex Regexp `yaml:"regex"`
 }
 
-func (c *RegexpExtract) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (c *RegexpExtract) UnmarshalYAML(unmarshal func(any) error) error {
 	*c = DefaultRegexpExtract
 	type plain RegexpExtract
 	return unmarshal((*plain)(c))
@@ -334,7 +375,7 @@ type Regexp struct {
 }
 
 // MarshalYAML implements the yaml.Marshaler interface.
-func (re Regexp) MarshalYAML() (interface{}, error) {
+func (re Regexp) MarshalYAML() (any, error) {
 	if re.Regexp != nil {
 		return re.String(), nil
 	}
@@ -342,7 +383,7 @@ func (re Regexp) MarshalYAML() (interface{}, error) {
 }
 
 // UnmarshalYAML implements the yaml.Unmarshaler interface.
-func (re *Regexp) UnmarshalYAML(unmarshal func(interface{}) error) error {
+func (re *Regexp) UnmarshalYAML(unmarshal func(any) error) error {
 	var s string
 	if err := unmarshal(&s); err != nil {
 		return err
@@ -356,11 +397,16 @@ func (re *Regexp) UnmarshalYAML(unmarshal func(interface{}) error) error {
 }
 
 func substituteEnvVariables(value string) (string, error) {
+	missingEnv := ""
 	result := os.Expand(value, func(s string) string {
-		return os.Getenv(s)
+		v, ok := os.LookupEnv(s)
+		if !ok && missingEnv == "" {
+			missingEnv = s
+		}
+		return v
 	})
-	if result == "" {
-		return "", errors.New(value + " environment variable not found")
+	if missingEnv != "" {
+		return "", errors.New(missingEnv + " environment variable not found")
 	}
 	return result, nil
 }

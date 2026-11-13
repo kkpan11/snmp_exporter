@@ -9,9 +9,9 @@ Due to the dynamic dependency on NetSNMP, you must build the generator yourself.
 
 ```
 # Debian-based distributions.
-sudo apt-get install unzip build-essential libsnmp-dev # Debian-based distros
+sudo apt-get install unzip build-essential libsnmp-dev curl golang-go git # Debian-based distros
 # Redhat-based distributions.
-sudo yum install gcc make net-snmp net-snmp-utils net-snmp-libs net-snmp-devel # RHEL-based distros
+sudo yum install gcc make net-snmp net-snmp-utils net-snmp-libs net-snmp-devel golang-bin git patch # RHEL-based distros
 
 git clone https://github.com/prometheus/snmp_exporter.git
 cd snmp_exporter/generator
@@ -101,7 +101,7 @@ auths:
     auth_protocol: MD5  # MD5, SHA, SHA224, SHA256, SHA384, or SHA512. Defaults to MD5. -a option to NetSNMP.
                         # Used if security_level is authNoPriv or authPriv.
     priv_protocol: DES  # DES, AES, AES192, AES256, AES192C, or AES256C. Defaults to DES. -x option to NetSNMP.
-                        # Used if security_level is authPriv.
+                        # Used if security_level is authPriv. Cisco IOS and IOS XE need AES192C or AES256C
     priv_password: otherPass # Has no default. Also known as privKey, -X option to NetSNMP.
                              # Required if security_level is authPriv.
     context_name: context # Has no default. -n option to NetSNMP.
@@ -109,9 +109,11 @@ auths:
 
 modules:
   module_name:  # The module name. You can have as many modules as you want.
-    walk:       # List of OIDs to walk. Can also be SNMP object names or specific instances.
+    # List of OIDs to walk. Can also be SNMP object names or specific instances.
+    # Object names can be fully-qualified with the MIB name separated by `::`.
+    walk:
       - 1.3.6.1.2.1.2              # Same as "interfaces"
-      - sysUpTime                  # Same as "1.3.6.1.2.1.1.3"
+      - "SNMPv2-MIB::sysUpTime"    # Same as "1.3.6.1.2.1.1.3"
       - 1.3.6.1.2.1.31.1.1.1.6.40  # Instance of "ifHCInOctets" with index "40"
       - 1.3.6.1.2.1.2.2.1.4        # Same as ifMtu (used for filter example)
       - bsnDot11EssSsid            # Same as 1.3.6.1.4.1.14179.2.1.1.1.2 (used for filter example)
@@ -121,6 +123,14 @@ modules:
     retries: 3   # How many times to retry a failed request, defaults to 3.
     timeout: 5s  # Timeout for each individual SNMP request, defaults to 5s.
 
+    allow_nonincreasing_oids: false # Do not check whether the returned OIDs are increasing, defaults to false
+                                    # Some agents return OIDs out of order, but can complete the walk anyway.
+                                    # -Cc option of NetSNMP
+
+    use_unconnected_udp_socket: false # Use a unconnected udp socket, defaults to false
+                                      # Some multi-homed network gear isn't smart enough to send SNMP responses
+                                      # from the address it received the requests on. To work around that,
+                                      # we can open unconnected UDP socket and use sendto/recvfrom
 
     lookups:  # Optional list of lookups to perform.
               # The default for `keep_source_indexes` is false. Indexes must be unique for this option to be used.
@@ -133,6 +143,9 @@ modules:
         lookup: bsnDot11EssSsid
         drop_source_indexes: false  # If true, delete source index labels for this lookup.
                                     # This avoids label clutter when the new index is unique.
+        display_hint: "@mib"        # RFC 2579 DISPLAY-HINT to format the lookup value as a string.
+                                    # Useful when lookup values display as hex (e.g., 0x48656C6C6F) instead of text.
+                                    # Use "@mib" to use the hint from the MIB, or provide a custom hint string.
 
       # It is also possible to chain lookups or use multiple labels to gather label values.
       # This might be helpful to resolve multiple index labels to a proper human readable label.
@@ -149,6 +162,7 @@ modules:
       metricName:
         ignore: true # Drops the metric from the output.
         help: "string" # Override the generated HELP text provided by the MIB Description.
+        name: "string" # Override the OID name provided in the MIB Description.
         regex_extracts:
           Temp: # A new metric will be created appending this to the metricName to become metricNameTemp.
             - regex: '(.*)' # Regex to extract a value from the returned SNMP walks's value.
@@ -158,6 +172,7 @@ modules:
               value: '1' # The first entry whose regex matches and whose value parses wins.
             - regex: '.*'
               value: '0'
+        datetime_pattern: # Used if type = ParseDateAndTime. Uses the strptime format (See: man 3 strptime)
         offset: 1.0 # Add the value to the same. Applied after scale.
         scale: 1.0 # Scale the value of the sample by this value.
         type: DisplayString # Override the metric type, possible types are:
@@ -165,6 +180,9 @@ modules:
                              #   counter: An integer with type counter.
                              #   OctetString: A bit string, rendered as 0xff34.
                              #   DateAndTime: An RFC 2579 DateAndTime byte sequence. If the device has no time zone data, UTC is used.
+                             #   ParseDateAndTime: Parse a DisplayString and return the timestamp. See datetime_pattern config option
+                             #   ParseFloatString: Parse the value as a DisplayString and return the float64 value.
+                             #   NTPTimeStamp: Parse the NTP timestamp (RFC-1305, March 1992, Section 3.1) and return Unix timestamp as float.
                              #   DisplayString: An ASCII or UTF-8 string.
                              #   PhysAddress48: A 48 bit MAC address, rendered as 00:01:02:03:04:ff.
                              #   Float: A 32 bit floating-point value with type gauge.
@@ -177,6 +195,11 @@ modules:
                              #   EnumAsInfo: An enum for which a single timeseries is created. Good for constant values.
                              #   EnumAsStateSet: An enum with a time series per state. Good for variable low-cardinality enums.
                              #   Bits: An RFC 2578 BITS construct, which produces a StateSet with a time series per bit.
+        display_hint: "255a" # RFC 2579 DISPLAY-HINT to format OctetString values as readable strings.
+                             # Useful when vendor-specific types display as hex instead of text.
+                             # Use "@mib" to use the hint from the MIB, or provide a custom hint.
+                             # Only applies to OctetString types; ignored for types with dedicated handlers.
+                             # See the "DISPLAY-HINT for OctetString" section below for format details.
 
     filters: # Define filters to collect only a subset of OID table indices
       static: # static filters are handled in the generator. They will convert walks to multiple gets with the specified indices
@@ -193,6 +216,8 @@ modules:
           indices: ["2","3","4"]  # List of interface indices to get
 
       dynamic: # dynamic filters are handed by the snmp exporter. The generator will simply pass on the configuration in the snmp.yml.
+    # Note: Only the dynamic filters are included in the generated snmp.yml and passed to the snmp_exporter.
+    # Static filters are handled at generation time by the generator and do not appear in the runtime configuration.
                # The exporter will do a snmp walk of the oid and will restrict snmp walk made on the targets
                # to the index matching the value in the values list.
                # This would be typically used to specify a filter for interfaces with a certain name in ifAlias, ifSpeed or admin status.
@@ -210,7 +235,38 @@ to represent these strings in Prometheus. They can be "info" metrics, or they ca
 "state sets". SNMP does not specify which should be used, and it's up to the use case
 of the data. Some users may also prefer the raw integer value, rather than the string.
 
-In order to set enum integer to string mapping, you must use one of the two overrides.
+#### Enum indexes and lookups
+
+When an SNMP column with MIB enum values is used as a table **index** or **lookup**,
+the generator defaults to `EnumAsInfo` and the exporter emits human-readable strings
+in **label values** instead of numeric strings. For example:
+
+```
+# Before (numeric label)
+cempMemPoolUsed{cempMemPoolType="3", ...}
+
+# After (human-readable label)
+cempMemPoolUsed{cempMemPoolType="ioMemory", ...}
+```
+
+This applies when regenerating any module, not only the default `snmp.yml`. Plain
+integer indexes (such as `ifIndex`) and string lookups (such as `ifDescr`) are
+unchanged. Unknown enum values fall back to the decimal string (e.g. `"99"`).
+
+To keep numeric label values, override the column with `type: gauge`:
+
+```yaml
+modules:
+  cisco_device:
+    overrides:
+      cempMemPoolType:
+        type: gauge
+```
+
+#### Enum metric columns
+
+For enum columns exported as their own metrics (not just as indexes or lookups), use
+one of the two overrides to control how the sample is represented:
 
 `EnumAsInfo` should be used for properties that provide inventory-like data. For example
 a device type, the name of a colour etc. It is important that this value is constant.
@@ -220,25 +276,63 @@ to alert on. For example the link state, is it up or down, is it in an error sta
 whether a panel is open or closed etc. Please be careful to not use this for high
 cardinality values as it will generate 1 time series per possible value.
 
+### DISPLAY-HINT for OctetString
+
+When the snmp_exporter encounters an OctetString with an unknown textual convention, it
+renders the value as hexadecimal (e.g., `0x506F776572456467652052373530`). This often
+happens with vendor-specific types that have a DISPLAY-HINT in the MIB but no built-in
+handler in the exporter.
+
+The `display_hint` override lets you format these values as readable strings. Use `@mib`
+to apply the hint from the MIB (resolved through TC imports), or provide a custom hint string.
+
+Hint format (RFC 2579 Section 3.1): each specifier is `<length><format><separator>` where:
+- `length` - bytes to consume per application (e.g., `1`, `2`, `255`)
+- `format` - output format: `a` (ASCII), `t` (UTF-8), `d` (decimal), `x` (hex), `o` (octal)
+- `separator` - optional character emitted after each application (e.g., `:`, `.`, `-`)
+
+The last specifier repeats for remaining data (implicit repetition). For example, `1x:`
+applied to 6 bytes produces `AA:BB:CC:DD:EE:FF` - the `1x:` spec repeats 6 times.
+
+Common patterns:
+| Hint | Description | Example Output |
+|------|-------------|----------------|
+| `255a` | ASCII text | `PowerEdge R750` |
+| `32a`, `64a` | ASCII with different length limits | `eth0` |
+| `1x:` | Hex bytes, colon separator (MAC) | `00:1A:2B:3C:4D:5E` |
+| `1x-` | Hex bytes, dash separator (Windows MAC) | `00-1A-2B-3C-4D-5E` |
+| `1x` | Hex bytes, no separator | `001A2B3C4D5E` |
+| `1d.` | Decimal bytes, dot separator (IPv4) | `192.168.1.1` |
+| `2x:` | Hex pairs, colon separator (IPv6) | `2001:0DB8:0000:0001` |
+| `1x:1x:1x:1x:1x:1x:1x:1x` | 8-byte WWN (Fibre Channel) | `20:00:00:1B:32:A1:C0:9F` |
+
+Notes:
+- The length number is bytes consumed per application, not a maximum string length
+- `a` and `t` are usually interchangeable; `t` indicates UTF-8 explicitly
+- Hex output (`x`) is uppercase and zero-padded (e.g., `1x` outputs `0A` not `A`)
+- Trailing separators are automatically suppressed
+- Can be combined with `regex_extracts`: `display_hint` formats the value, then `regex_extracts` matches against the result
+
+Example: A vendor MIB defines `modelName` with hint `255a`, but the exporter shows
+`0x506F77657245646765` instead of `PowerEdge`. Adding `display_hint: "@mib"` to the
+override will format it correctly.
+
+See https://www.rfc-editor.org/rfc/rfc2579#section-3.1 for the full specification.
+
+This only applies to OctetString types. Types with dedicated handlers (DisplayString,
+PhysAddress48, InetAddressIPv4, etc.) ignore this setting.
+
 ## Where to get MIBs
 
-Some of these are quite sluggish, so use wget to download.
+Many vendor MIBs are already included via the
+[prometheus-community/snmp](https://github.com/prometheus-community/snmp)
+repository. Run `make mibs` in the generator directory to download all
+supported MIBs automatically.
 
-Put the extracted mibs in a location NetSNMP can read them from. `$HOME/.snmp/mibs` is one option.
-
-* Cisco: ftp://ftp.cisco.com/pub/mibs/v2/v2.tar.gz
-* APC: https://download.schneider-electric.com/files?p_File_Name=powernet432.mib
-* Servertech: ftp://ftp.servertech.com/Pub/SNMP/sentry3/Sentry3.mib
-* Palo Alto PanOS 7.0 enterprise MIBs: https://www.paloaltonetworks.com/content/dam/pan/en_US/assets/zip/technical-documentation/snmp-mib-modules/PAN-MIB-MODULES-7.0.zip
-* Arista Networks: https://www.arista.com/assets/data/docs/MIBS/ARISTA-ENTITY-SENSOR-MIB.txt
-                   https://www.arista.com/assets/data/docs/MIBS/ARISTA-SW-IP-FORWARDING-MIB.txt
-                   https://www.arista.com/assets/data/docs/MIBS/ARISTA-SMI-MIB.txt
-* Synology: https://global.download.synology.com/download/Document/Software/DeveloperGuide/Firmware/DSM/All/enu/Synology_MIB_File.zip
-* MikroTik: http://download2.mikrotik.com/Mikrotik.mib
-* UCD-SNMP-MIB (Net-SNMP): http://www.net-snmp.org/docs/mibs/UCD-SNMP-MIB.txt
-* Ubiquiti Networks: http://dl.ubnt-ut.com/snmp/UBNT-MIB
-                     http://dl.ubnt-ut.com/snmp/UBNT-UniFi-MIB
-                     https://dl.ubnt.com/firmwares/airos-ubnt-mib/ubnt-mib.zip
+For MIBs not yet covered, check the vendor's support or developer portal
+directly. Vendor MIBs contributed to `prometheus-community/snmp` are
+preferred over direct vendor links as they are maintained and versioned
+centrally.
 
 https://github.com/librenms/librenms/tree/master/mibs can also be a good source of MIBs.
 
